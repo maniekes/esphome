@@ -2,6 +2,7 @@
 
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/touchscreen/touchscreen.h"
+#include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
 
@@ -28,6 +29,7 @@ class GT911Touchscreen final : public touchscreen::Touchscreen, public i2c::I2CD
   void setup() override;
   void dump_config() override;
   bool can_proceed() override { return this->setup_done_; }
+  void sleep();
 
   /// Set a interrupt pin (supports hardware interrupts or expander connected).
   void set_interrupt_pin(GPIOPin *pin) { this->interrupt_pin_ = pin; }
@@ -54,6 +56,11 @@ class GT911Touchscreen final : public touchscreen::Touchscreen, public i2c::I2CD
   GPIOPin *reset_pin_{nullptr};
   std::vector<GT911ButtonListener *> button_listeners_;
   uint8_t button_state_{0xFF};  // last button state. Initial FF guarantees first update.
+};
+
+template <typename... Ts> class SleepAction : public Action<Ts...>, public Parented<GT911Touchscreen> {
+ public:
+  void play(Ts... x) override { this->parent_->sleep(); }
 };
 
 }  // namespace esphome::gt911

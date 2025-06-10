@@ -1,4 +1,4 @@
-from esphome import pins
+from esphome import automation, pins
 import esphome.codegen as cg
 from esphome.components import i2c, touchscreen
 import esphome.config_validation as cv
@@ -21,6 +21,26 @@ CONFIG_SCHEMA = touchscreen.TOUCHSCREEN_SCHEMA.extend(
         cv.Optional(CONF_RESET_PIN): pins.gpio_output_pin_schema,
     }
 ).extend(i2c.i2c_device_schema(0x5D))
+
+SleepAction = gt911_ns.class_("SleepAction", automation.Action)
+
+
+@automation.register_action(
+    "gt911.sleep",
+    SleepAction,
+    automation.maybe_simple_id(
+        {
+            cv.GenerateID(): cv.use_id(GT911Touchscreen),
+        }
+    ),
+    synchronous=True,
+)
+
+
+async def gt911_sleep_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
 
 
 async def to_code(config: ConfigType) -> None:
