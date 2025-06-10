@@ -12,6 +12,7 @@ static const uint8_t GET_TOUCH_STATE[2] = {0x81, 0x4E};
 static const uint8_t CLEAR_TOUCH_STATE[3] = {0x81, 0x4E, 0x00};
 static const uint8_t GET_TOUCHES[2] = {0x81, 0x4F};
 static const uint8_t GET_SWITCHES[2] = {0x80, 0x4D};
+static const uint8_t GO_SLEEP[3] = {0x80, 0x40, 0x05};
 static const uint8_t GET_MAX_VALUES[2] = {0x80, 0x48};
 static const size_t MAX_TOUCHES = 5;  // max number of possible touches reported
 static const size_t MAX_BUTTONS = 4;  // max number of buttons scanned
@@ -87,6 +88,26 @@ void GT911Touchscreen::setup() {
   }
 
   ESP_LOGCONFIG(TAG, "GT911 Touchscreen setup complete");
+}
+
+void GT911Touchscreen::sleep() {
+  i2c::ErrorCode err;
+  ESP_LOGCONFIG(TAG, "Sleeping GT911 Touchscreen");
+  if (this->interrupt_pin_ != nullptr) {
+    this->interrupt_pin_->pin_mode(gpio::FLAG_OUTPUT);
+    this->interrupt_pin_->setup();
+    this->interrupt_pin_->digital_write(false);
+  }
+  err = this->write(GO_SLEEP, 3);
+  if (this->interrupt_pin_ != nullptr) {
+    this->interrupt_pin_->pin_mode(gpio::FLAG_INPUT);
+    this->interrupt_pin_->setup();
+  }
+  if (err != i2c::ERROR_OK) {
+    ESP_LOGE(TAG, "Failed to put touchscreen to sleep!");
+    this->mark_failed();
+    return;
+  }
 }
 
 void GT911Touchscreen::update_touches() {

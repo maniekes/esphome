@@ -17,6 +17,7 @@ class GT911Touchscreen : public touchscreen::Touchscreen, public i2c::I2CDevice 
  public:
   void setup() override;
   void dump_config() override;
+  void sleep();
 
   void set_interrupt_pin(InternalGPIOPin *pin) { this->interrupt_pin_ = pin; }
   void set_reset_pin(GPIOPin *pin) { this->reset_pin_ = pin; }
@@ -31,5 +32,9 @@ class GT911Touchscreen : public touchscreen::Touchscreen, public i2c::I2CDevice 
   uint8_t button_state_{0xFF};  // last button state. Initial FF guarantees first update.
 };
 
+template <typename... Ts> class SleepAction : public Action<Ts...>, public Parented<GT911Touchscreen> {
+ public:
+  void play(Ts... x) override { this->parent_->sleep(); }
+};
 }  // namespace gt911
 }  // namespace esphome
