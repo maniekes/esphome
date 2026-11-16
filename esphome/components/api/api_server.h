@@ -5,12 +5,13 @@
 #include "api_buffer.h"
 // Must precede clients_ so APIConnection is complete for default_delete (libc++).
 #include "api_connection.h"
-#ifdef USE_API_NOISE
+#if defined(USE_API_NOISE) || defined(USE_NOISE_SPARE_EPHEMERAL)
 // Only present in the build when the noise component is loaded
 #include "esphome/components/noise/noise.h"
 #endif
 #include "api_pb2.h"
 #include "api_pb2_service.h"
+#include "api_outgoing_connection.h"
 #include "esphome/components/socket/socket.h"
 #include "esphome/core/automation.h"
 #include "esphome/core/component.h"
@@ -29,6 +30,7 @@
 
 #include <array>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace esphome::api {
@@ -90,6 +92,10 @@ class APIServer final : public Component
   void set_noise_psk(const uint8_t *psk) { this->noise_ctx_.set_psk(psk); }
   noise::NoiseContext &get_noise_ctx() { return this->noise_ctx_; }
 #endif  // USE_API_NOISE
+#ifdef USE_API_OUTGOING_CONNECTION
+  // Called by APIConnection when a client declares itself a dial-back target in its hello
+  void on_outgoing_target_client(APIConnection *conn);
+#endif
 
   void handle_disconnect(APIConnection *conn);
 #ifdef USE_BINARY_SENSOR
@@ -198,12 +204,19 @@ class APIServer final : public Component
 #ifdef USE_ZWAVE_PROXY
   void on_zwave_proxy_request(const ZWaveProxyRequest &msg);
 #endif
-#if defined(USE_IR_RF) || defined(USE_RADIO_FREQUENCY)
-  void send_infrared_rf_receive_event(uint32_t device_id, uint32_t key, const std::vector<int32_t> *timings);
+#ifdef USE_SERIAL_PROXY_USB_IDENTITY
+  /// Tell every subscribed client that a serial proxy port's identity changed
+  void send_serial_proxy_identity(const SerialProxyIdentity &msg);
+#endif
+#ifdef USE_IR_RF
+  void send_infrared_rf_receive_event(uint32_t device_id, uint32_t key, std::span<const int32_t> timings);
 #endif
 
   bool is_connected() const { return this->api_connection_count_ != 0; }
   bool is_connected_with_state_subscription() const;
+  bool is_connected(bool state_subscription_only) const {
+    return state_subscription_only ? this->is_connected_with_state_subscription() : this->is_connected();
+  }
 
   // Range-for view over the populated slice [0, api_connection_count_). Read-only with respect
   // to ownership; callers get `const unique_ptr&` so they can invoke non-const methods on the
@@ -228,6 +241,9 @@ class APIServer final : public Component
     const char *attribute;  // Pointer to flash or nullptr (nullptr means no attribute)
     std::function<void(StringRef)> callback;
     bool once;
+    // strlen(entity_id), so a state is matched without measuring every entry; fits in the padding after once.
+    // Home Assistant entity ids are at most 255 bytes.
+    uint16_t entity_id_len;
 
     // Dynamic storage for external components using std::string API (custom_api_device.h)
     // These are only allocated when using the std::string overload (nullptr for const char* overload)
@@ -252,6 +268,10 @@ class APIServer final : public Component
                                 std::function<void(const std::string &)> &&f);
 
   const std::vector<HomeAssistantStateSubscription> &get_state_subs() const;
+#ifdef USE_API_WIZARD_LINKED_INPUTS
+  /// Measure again the subscriptions whose entity id is this buffer, after the wizard wrote a new id into it.
+  void update_state_subscription_entity_id(const char *entity_id);
+#endif
 #endif
 #ifdef USE_API_USER_DEFINED_ACTIONS
   const std::vector<UserServiceDescriptor *> &get_user_services() const { return this->user_services_; }
@@ -267,6 +287,16 @@ class APIServer final : public Component
  protected:
   // Accept incoming socket connections. Only called when socket has pending connections.
   void __attribute__((noinline)) accept_new_connections_();
+  /// Takes the socket into a new connection and starts it; callers must have
+  /// checked at_client_limit_() first
+  APIConnection *add_client_(std::unique_ptr<socket::Socket> sock);
+  bool at_client_limit_() const { return this->api_connection_count_ >= MAX_API_CONNECTIONS; }
+#ifdef USE_API_OUTGOING_CONNECTION
+  // Returns the new connection, or nullptr (socket dropped) when at the limit
+  APIConnection *add_outgoing_client_(std::unique_ptr<socket::Socket> sock);
+  bool has_outgoing_target_client_() const { return this->outgoing_target_count_ != 0; }
+  friend class OutgoingConnectionManager;
+#endif
   // Remove a disconnected client by index. Swaps with the last populated slot and resets it.
   void __attribute__((noinline)) remove_client_(uint8_t client_index);
 
@@ -307,6 +337,8 @@ class APIServer final : public Component
     delete this->socket_;
     this->socket_ = nullptr;
   }
+  /// Log the failure, drop the listen socket, and mark the component failed
+  /// unless this build can still dial out
   void socket_failed_(const LogString *msg);
   // Pointers and pointer-like types first (4 bytes each)
   socket::ListenSocket *socket_{nullptr};
@@ -357,16 +389,21 @@ class APIServer final : public Component
   // Group smaller types together
   uint16_t port_{6053};        // Keep in sync with DEFAULT_PORT in __init__.py
   uint16_t batch_delay_{100};  // Keep in sync with DEFAULT_BATCH_DELAY in __init__.py
-  // Connection limits - these defaults will be overridden by config values
-  // from cv.SplitDefault in __init__.py which sets platform-specific defaults.
-  uint8_t listen_backlog_{4};
+  uint8_t listen_backlog_{4};  // Keep in sync with DEFAULT_LISTEN_BACKLOG in __init__.py
   bool shutting_down_ = false;
   uint8_t api_connection_count_{0};
+#ifdef USE_API_OUTGOING_CONNECTION
+  // Connected clients whose hello declared them a dial-back target
+  uint8_t outgoing_target_count_{0};
+#endif
 #if defined(USE_PROVISIONING) && defined(USE_API_NOISE)
   // Index assigned by the provisioning manager for reporting this transport's state.
   uint8_t provisioning_source_{0};
 #endif
 
+#ifdef USE_NOISE_SPARE_EPHEMERAL
+  void refill_spare_ephemeral_();
+#endif
 #ifdef USE_API_NOISE
   noise::NoiseContext noise_ctx_;
 #ifndef USE_API_NOISE_PSK_FROM_YAML
@@ -374,20 +411,12 @@ class APIServer final : public Component
 #endif
   ESPPreferenceObject noise_pref_;
 #endif  // USE_API_NOISE
+#ifdef USE_API_OUTGOING_CONNECTION
+  OutgoingConnectionManager outgoing_conn_;
+#endif
 };
 
 extern APIServer *global_api_server;  // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
-
-template<typename... Ts> class APIConnectedCondition final : public Condition<Ts...> {
-  TEMPLATABLE_VALUE(bool, state_subscription_only)
- public:
-  bool check(const Ts &...x) override {
-    if (this->state_subscription_only_.value(x...)) {
-      return global_api_server->is_connected_with_state_subscription();
-    }
-    return global_api_server->is_connected();
-  }
-};
 
 }  // namespace esphome::api
 #endif

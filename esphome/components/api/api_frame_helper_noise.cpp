@@ -22,7 +22,7 @@ using noise::noise_err_to_logstr;
 static_assert(MAX_HANDSHAKE_SIZE == noise::MAX_HANDSHAKE_SIZE,
               "api and noise component handshake size limits must match");
 
-static const char *const TAG = "api.noise";
+ESPHOME_LOG_TAG(TAG, "api.noise");
 static constexpr char PROLOGUE_INIT[] PROGMEM = "NoiseAPIInit";
 static constexpr size_t PROLOGUE_INIT_LEN = 12;  // strlen("NoiseAPIInit")
 
@@ -70,6 +70,13 @@ APIError APINoiseFrameHelper::init() {
   state_ = State::CLIENT_HELLO;
   return APIError::OK;
 }
+#ifdef USE_API_OUTGOING_CONNECTION
+APIError APINoiseFrameHelper::send_server_hello_first() {
+  // The peer needs our name and MAC to pick the key before its first message
+  this->state_ = State::CLIENT_HELLO_OUTGOING;
+  return this->send_server_hello_frame_();
+}
+#endif
 #ifdef USE_API_PLAINTEXT
 APIError APINoiseFrameHelper::init_from_handoff(const uint8_t *header, uint8_t header_len) {
   APIError err = this->init();
@@ -242,6 +249,9 @@ APIError APINoiseFrameHelper::state_action_() {
       HELPER_LOG("Bad state for method: %d", (int) this->state_);
       return APIError::BAD_STATE;
     case State::CLIENT_HELLO:
+#ifdef USE_API_OUTGOING_CONNECTION
+    case State::CLIENT_HELLO_OUTGOING:
+#endif
       return this->state_action_client_hello_();
     case State::SERVER_HELLO:
       return this->state_action_server_hello_();
@@ -268,17 +278,21 @@ APIError APINoiseFrameHelper::state_action_client_hello_() {
     state_ = State::FAILED;
     return APIError::OUT_OF_MEMORY;
   }
-  dst[0] = (uint8_t) (rx_size >> 8);
-  dst[1] = (uint8_t) rx_size;
+  uint8_t *payload = put_be16(dst, rx_size);
   if (rx_size > 0) {
-    std::memcpy(dst + 2, this->rx_buf_.data(), rx_size);
+    std::memcpy(payload, this->rx_buf_.data(), rx_size);
   }
 
+#ifdef USE_API_OUTGOING_CONNECTION
+  if (this->state_ == State::CLIENT_HELLO_OUTGOING) {
+    // Server hello already went out at handoff
+    return this->start_handshake_();
+  }
+#endif
   state_ = State::SERVER_HELLO;
   return APIError::OK;
 }
-APIError APINoiseFrameHelper::state_action_server_hello_() {
-  // send server hello
+APIError APINoiseFrameHelper::send_server_hello_frame_() {
   const auto &name = App.get_name();
   char mac[MAC_ADDRESS_BUFFER_SIZE];
   get_mac_address_into_buffer(mac);
@@ -302,15 +316,18 @@ APIError APINoiseFrameHelper::state_action_server_hello_() {
   // node mac, terminated by null byte
   std::memcpy(msg + mac_offset, mac, MAC_ADDRESS_BUFFER_SIZE);
 
-  APIError aerr = write_frame_(msg, total_size);
+  return write_frame_(msg, total_size);
+}
+APIError APINoiseFrameHelper::state_action_server_hello_() {
+  APIError aerr = this->send_server_hello_frame_();
   if (aerr != APIError::OK)
     return aerr;
-
-  // start handshake
-  aerr = init_handshake_();
+  return this->start_handshake_();
+}
+APIError APINoiseFrameHelper::start_handshake_() {
+  APIError aerr = init_handshake_();
   if (aerr != APIError::OK)
     return aerr;
-
   state_ = State::HANDSHAKE;
   return APIError::OK;
 }
@@ -446,10 +463,8 @@ APIError APINoiseFrameHelper::encrypt_noise_message_(uint8_t *buf_start, uint16_
 
   // Write message header (to be encrypted)
   constexpr uint8_t msg_offset = noise::FRAME_HEADER_SIZE;
-  buf_start[msg_offset] = static_cast<uint8_t>(message_type >> 8);      // type high byte
-  buf_start[msg_offset + 1] = static_cast<uint8_t>(message_type);       // type low byte
-  buf_start[msg_offset + 2] = static_cast<uint8_t>(payload_size >> 8);  // data_len high byte
-  buf_start[msg_offset + 3] = static_cast<uint8_t>(payload_size);       // data_len low byte
+  put_be16(buf_start + msg_offset, message_type);
+  put_be16(buf_start + msg_offset + 2, payload_size);
   // payload data is already in the buffer starting at offset + 7
 
   // Encrypt the message in place
