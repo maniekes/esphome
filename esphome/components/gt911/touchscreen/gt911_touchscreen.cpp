@@ -43,6 +43,16 @@ void GT911Touchscreen::setup() {
     });
     return;
   }
+  if (this->interrupt_pin_ != nullptr) {
+    // MCU deep sleep does not power-cycle GT911. Wake it before reading configuration.
+    this->interrupt_pin_->setup();
+    this->interrupt_pin_->pin_mode(gpio::FLAG_OUTPUT);
+    this->interrupt_pin_->digital_write(true);
+    delay(3);
+    this->interrupt_pin_->pin_mode(gpio::FLAG_INPUT);
+    this->set_timeout(60, [this] { this->setup_internal_(); });
+    return;
+  }
   this->setup_internal_();
 }
 
@@ -103,31 +113,47 @@ void GT911Touchscreen::setup_internal_() {
   if (!this->setup_check(err == i2c::ERROR_OK))
     return;
   this->setup_done_ = true;
+  if (this->sleep_requested_) {
+    // Complete a request made before initialization outside the setup callback.
+    this->defer([this]() { this->sleep(); });
+  }
 }
 
 void GT911Touchscreen::sleep() {
-  i2c::ErrorCode err;
-  ESP_LOGCONFIG(TAG, "Sleeping GT911 Touchscreen");
+  this->sleep_requested_ = true;
+  if (this->sleeping_ || !this->setup_done_ || this->is_failed())
+    return;
+
+  // Stop host activity before taking ownership of INT. setup() would restore
+  // the configured pin mode, so it must not be called here.
+  this->stop_poller();
+  this->cancel_timeout(uint32_t{0});  // Touchscreen's touch-release timeout.
+  if (this->interrupt_pin_ != nullptr && this->interrupt_pin_->is_internal())
+    static_cast<InternalGPIOPin *>(this->interrupt_pin_)->detach_interrupt();
+  this->store_.touched = false;
   if (this->interrupt_pin_ != nullptr) {
+    this->interrupt_pin_->digital_write(false);
     this->interrupt_pin_->pin_mode(gpio::FLAG_OUTPUT);
-    this->interrupt_pin_->setup();
     this->interrupt_pin_->digital_write(false);
   }
-  err = this->write(GO_SLEEP, sizeof(GO_SLEEP));
-  if (this->interrupt_pin_ != nullptr) {
-    this->interrupt_pin_->pin_mode(gpio::FLAG_INPUT);
-    this->interrupt_pin_->setup();
-  }
+  delay(5);
+  const i2c::ErrorCode err = this->write(GO_SLEEP, sizeof(GO_SLEEP));
   if (err != i2c::ERROR_OK) {
-    ESP_LOGE(TAG, "Failed to put touchscreen to sleep!");
-    this->mark_failed();
+    ESP_LOGW(TAG, "GT911 sleep write failed (I2C error %d, address 0x%02X); later sleep calls may retry",
+             static_cast<int>(err), this->address_);
+    this->status_set_warning();
     return;
   }
+  // Keep INT low: a high pulse can wake GT911. A sleeping chip may not ACK again.
+  this->sleeping_ = true;
+  this->status_clear_warning();
+  this->disable_loop();
+  ESP_LOGI(TAG, "GT911 sleep command acknowledged; touch polling and interrupts stopped");
 }
 
 void GT911Touchscreen::update_touches() {
   this->skip_update_ = true;  // skip send touch events by default, set to false after successful error checks
-  if (!this->setup_done_) {
+  if (!this->setup_done_ || this->sleep_requested_) {
     return;
   }
 

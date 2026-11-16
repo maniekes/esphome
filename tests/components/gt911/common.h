@@ -27,9 +27,14 @@ class RegisterBus final : public i2c::I2CBus {
   std::map<uint16_t, std::vector<uint8_t>> registers;
   uint16_t pointer{0};
   bool fail{false};
+  std::vector<std::vector<uint8_t>> writes;
+  size_t transactions{0};
 
   i2c::ErrorCode write_readv(uint8_t address, const uint8_t *data, size_t size, uint8_t *out,
                              size_t out_size) override {
+    this->transactions++;
+    if (size != 0)
+      this->writes.emplace_back(data, data + size);
     if (this->fail)
       return i2c::ERROR_NOT_ACKNOWLEDGED;
     if (size == 2)

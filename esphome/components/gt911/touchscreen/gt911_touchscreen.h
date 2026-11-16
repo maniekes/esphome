@@ -16,7 +16,7 @@ class GT911ButtonListener {
 class GT911Touchscreen final : public touchscreen::Touchscreen, public i2c::I2CDevice {
  public:
   /// With a reset pin the chip is reset with the interrupt pin held low, which selects address 0x5D, and the
-  /// rest of the setup runs from timeouts once the chip is ready. Without one setup_internal_() runs at once.
+  /// rest of setup runs from timeouts. With INT alone, wake the chip first; with neither pin, set up immediately.
   void setup() override;
   void dump_config() override;
   bool can_proceed() override { return this->setup_done_; }
@@ -42,6 +42,8 @@ class GT911Touchscreen final : public touchscreen::Touchscreen, public i2c::I2CD
   void setup_internal_();
   /// @brief True if the touchscreen setup has completed successfully.
   bool setup_done_{false};
+  bool sleep_requested_{false};
+  bool sleeping_{false};
 
   GPIOPin *interrupt_pin_{nullptr};
   GPIOPin *reset_pin_{nullptr};
@@ -49,7 +51,7 @@ class GT911Touchscreen final : public touchscreen::Touchscreen, public i2c::I2CD
   uint8_t button_state_{0xFF};  // last button state. Initial FF guarantees first update.
 };
 
-template <typename... Ts> class SleepAction : public Action<Ts...>, public Parented<GT911Touchscreen> {
+template<typename... Ts> class SleepAction : public Action<Ts...>, public Parented<GT911Touchscreen> {
  public:
   void play(Ts... x) override { this->parent_->sleep(); }
 };
